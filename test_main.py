@@ -16,20 +16,22 @@ import time
 # from librosa.filters import mel as librosa_mel_fn
 # from librosa.util import normalize
 import torch
-import torchaudio
+# import torchaudio
 import torch.utils.data
 
 from mel_spect import get_mel_spect
 # import synthesis
 from model_bl import D_VECTOR
 from collections import OrderedDict
+from math import ceil
+from model_vc import Generator
 
-from parallel_wavegan.utils import load_model
+# from parallel_wavegan.utils import load_model
 
 CHANNELS = 1
 
 attr_d = {
-    "segment_size": 8192,
+    "segment_size": 8000, #8192,
     "num_mels": 80,
     "num_freq": 1025,
     "n_fft": 1024,
@@ -43,9 +45,9 @@ attr_d = {
     "fmax_for_loss": 0,
 }
 
-to_mel = torchaudio.transforms.MelSpectrogram(
-    n_mels=80, n_fft=1024, win_length=1024, hop_length=256)
-mean, std = -4, 4
+# to_mel = torchaudio.transforms.MelSpectrogram(
+#     n_mels=80, n_fft=1024, win_length=1024, hop_length=256)
+# mean, std = -4, 4
 
 def preprocess(wave):
     wave_tensor = torch.from_numpy(wave).float()
@@ -69,6 +71,12 @@ def get_speaker_model():
         new_state_dict[new_key] = val
     C.load_state_dict(new_state_dict)
     return C
+
+def pad_seq(x, base=32):
+    len_out = int(base * ceil(float(x.shape[0])/base))
+    len_pad = len_out - x.shape[0]
+    assert len_pad >= 0
+    return np.pad(x, ((0,len_pad),(0,0)), 'constant'), len_pad
 
 
 p = pyaudio.PyAudio()
@@ -112,30 +120,45 @@ def load_vocoder():
 # vocoder = synthesis.build_model().cuda()
 # checkpoint = torch.load("checkpoint_step001000000_ema.pth")
 # vocoder.load_state_dict(checkpoint["state_dict"])
-vocoder = load_vocoder()
+# vocoder = load_vocoder()
+
+def load_autovc():
+    device = 'cuda:0'
+    G = Generator(32,256,512,32).eval().to(device)
+
+    g_checkpoint = torch.load('autovc.ckpt', map_location=device)
+    G.load_state_dict(g_checkpoint['model'])
+    return G
+
+conv = load_autovc()
+spke = get_speaker_model()
 
 def callback(in_data, frame_count, time_info, status):
     data = np.frombuffer(in_data, dtype=np.float32)
     
-    # spec = get_mel_spect(data)
-    spec = preprocess(data)
+    spec = get_mel_spect(data)
+    # spec = preprocess(data)
     # print(spec[:10])
-    print('mel hsape:', spec.shape)
-
+    print('mel shape:', spec.shape)
+    spec, pad_len = pad_seq(spec)
+    print('pad_len:', pad_len)
+    melsp = torch.from_numpy(spec[np.newaxis, :, :]).cuda()
     with torch.no_grad():
-    #     # spec = SVCGenA.infer(spec, spkembe)
+        emb = spke(melsp)
+        _, x_identic_psnt, _ = conv(melsp, emb, emb)
     #     spec = SVCGen.infer(spec)
     #     print('trans shape:', spec.shape)
     #     hifigan_output = torch_model(spec)
     
-        y_out = vocoder.inference(spec)
-        y_out = y_out.view(-1).cpu().numpy()
+        # y_out = vocoder.inference(spec)
+        # y_out = y_out.view(-1).cpu().numpy()
 
     # waveform = synthesis.wavegen(vocoder, c=spec)
     # output = hifigan_output.squeeze().detach().numpy()
-    print(y_out.shape)
+    print(emb.shape, x_identic_psnt.shape)
 
-    return (y_out[:attr_d["segment_size"]], pyaudio.paContinue)
+    # return (y_out[:attr_d["segment_size"]], pyaudio.paContinue)
+    return (in_data, pyaudio.paContinue)
 
 
 stream = p.open(format=pyaudio.paFloat32,
