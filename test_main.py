@@ -26,7 +26,7 @@ from collections import OrderedDict
 from math import ceil
 from model_vc import Generator
 
-# from parallel_wavegan.utils import load_model
+from parallel_wavegan.utils import load_model
 
 CHANNELS = 1
 
@@ -48,6 +48,61 @@ attr_d = {
 # to_mel = torchaudio.transforms.MelSpectrogram(
 #     n_mels=80, n_fft=1024, win_length=1024, hop_length=256)
 # mean, std = -4, 4
+
+def logmelfilterbank(
+    audio,
+    sampling_rate,
+    fft_size=1024,
+    hop_size=256,
+    win_length=None,
+    window="hann",
+    num_mels=80,
+    fmin=None,
+    fmax=None,
+    eps=1e-10,
+    log_base=10.0,
+):
+    """Compute log-Mel filterbank feature.
+    Args:
+        audio (ndarray): Audio signal (T,).
+        sampling_rate (int): Sampling rate.
+        fft_size (int): FFT size.
+        hop_size (int): Hop size.
+        win_length (int): Window length. If set to None, it will be the same as fft_size.
+        window (str): Window function type.
+        num_mels (int): Number of mel basis.
+        fmin (int): Minimum frequency in mel basis calculation.
+        fmax (int): Maximum frequency in mel basis calculation.
+        eps (float): Epsilon value to avoid inf in log calculation.
+        log_base (float): Log base. If set to None, use np.log.
+    Returns:
+        ndarray: Log Mel filterbank feature (#frames, num_mels).
+    """
+    # get amplitude spectrogram
+    x_stft = librosa.stft(
+        audio,
+        n_fft=fft_size,
+        hop_length=hop_size,
+        win_length=win_length,
+        window=window,
+        pad_mode="reflect",
+    )
+    spc = np.abs(x_stft).T  # (#frames, #bins)
+
+    # get mel basis
+    fmin = 0 if fmin is None else fmin
+    fmax = sampling_rate / 2 if fmax is None else fmax
+    mel_basis = librosa.filters.mel(sampling_rate, fft_size, num_mels, fmin, fmax)
+    mel = np.maximum(eps, np.dot(spc, mel_basis.T))
+
+    if log_base is None:
+        return np.log(mel)
+    elif log_base == 10.0:
+        return np.log10(mel)
+    elif log_base == 2.0:
+        return np.log2(mel)
+    else:
+        raise ValueError(f"{log_base} is not supported.")
 
 def preprocess(wave):
     wave_tensor = torch.from_numpy(wave).float()
@@ -112,9 +167,10 @@ def load_vocoder():
     # load vocoder
     # vocoder = load_model("Vocoder/checkpoint-400000steps.pkl").to('cuda').eval()
     # vocoder = load_model("Vocoder/checkpoint-400000steps.pkl").eval()
-    vocoder = load_model("pretrained_model/arctic_slt_parallel_wavegan.v1/checkpoint-400000steps.pkl").eval()
+    vocoder = load_model("pretrained_model/arctic_slt_parallel_wavegan.v1/checkpoint-400000steps.pkl").cuda()
     vocoder.remove_weight_norm()
-    _ = vocoder.eval()
+    vocoder = vocoder.eval().cuda()
+    print('vocoder', vocoder)
     return vocoder
 
 # vocoder = synthesis.build_model().cuda()
@@ -132,6 +188,7 @@ def load_autovc():
 
 conv = load_autovc()
 spke = get_speaker_model()
+vocoder = load_vocoder()
 
 def callback(in_data, frame_count, time_info, status):
     data = np.frombuffer(in_data, dtype=np.float32)
@@ -145,20 +202,24 @@ def callback(in_data, frame_count, time_info, status):
     melsp = torch.from_numpy(spec[np.newaxis, :, :]).cuda()
     with torch.no_grad():
         emb = spke(melsp)
-        _, x_identic_psnt, _ = conv(melsp, emb, emb)
+        _, mel, _ = conv(melsp, emb, emb)
     #     spec = SVCGen.infer(spec)
     #     print('trans shape:', spec.shape)
     #     hifigan_output = torch_model(spec)
-    
-        # y_out = vocoder.inference(spec)
+        mel = mel[0, :, :] if pad_len == 0 else mel[0, :-pad_len, :]
+        mel = mel.squeeze()
+        # c = x_identic_psnt.squeeze() #.to('cuda')
+        print(emb.shape, melsp.shape)
+        y_out = vocoder.inference(c=melsp.squeeze()).view(-1).cpu().numpy()
+        print('y_out shape:', y_out.shape)
         # y_out = y_out.view(-1).cpu().numpy()
 
     # waveform = synthesis.wavegen(vocoder, c=spec)
     # output = hifigan_output.squeeze().detach().numpy()
-    print(emb.shape, x_identic_psnt.shape)
+    
 
     # return (y_out[:attr_d["segment_size"]], pyaudio.paContinue)
-    return (in_data, pyaudio.paContinue)
+    return (y_out[:attr_d["segment_size"]], pyaudio.paContinue)
 
 
 stream = p.open(format=pyaudio.paFloat32,
