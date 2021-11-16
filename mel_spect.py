@@ -28,7 +28,7 @@ def pySTFT(x, fft_length=1024, hop_length=256):
     
     fft_window = get_window('hann', fft_length, fftbins=True)
     result = np.fft.rfft(fft_window * result, n=fft_length).T
-    
+    print('pySTFT shape: ', result.shape)
     return np.abs(result)    
     
 
@@ -42,7 +42,8 @@ def get_mel_spect(x):
     # Convert to mel and normalize
     D_mel = np.dot(D, mel_basis)
     D_db = 20 * np.log10(np.maximum(min_level, D_mel)) - 16
-    S = np.clip((D_db + 100) / 100, 0, 1)    
+    S = np.clip((D_db + 100) / 100, 0, 1)
+    print('get mel spect shape: ', S.shape) 
     # save spect    
     return S.astype(np.float32)
         
